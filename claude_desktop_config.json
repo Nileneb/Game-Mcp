@@ -1,0 +1,15 @@
+{
+    "mcpServers": {
+        "game-mining": {
+            "command": "python",
+            "args": [
+                "-m",
+                "game_mining_mcp.server"
+            ],
+            "env": {
+                "MINING_DB_PATH": "./mining.db",
+                "LOG_LEVEL": "INFO"
+            }
+        }
+    }
+}

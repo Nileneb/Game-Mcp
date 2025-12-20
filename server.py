@@ -1,264 +1,439 @@
-from __future__ import annotations
-import os
-import time
-import json
-import hmac
-import hashlib
+#!/usr/bin/env python3
+"""
+Enhanced Game-MCP Server für Mining
+Kombiniert IoT-Device Management, Mining-Koordination und Game-State Management
+"""
+
 import asyncio
-from typing import Any, Dict, List
+import json
+import logging
+import hashlib
+import time
+import random
+from typing import Dict, List, Any, Optional
+from dataclasses import dataclass, asdict
+from datetime import datetime, timedelta
+import sqlite3
+from contextlib import asynccontextmanager
 
-from dotenv import load_dotenv
-from fastmcp import FastMCP
-from pydantic import BaseModel, Field
-from starlette.requests import Request
-from starlette.responses import PlainTextResponse, StreamingResponse, JSONResponse
-
-load_dotenv()
-
-mcp = FastMCP(
-    name="paperstream",
-    instructions="Paperstream MCP over HTTP. SSE assignments + REST results.",
-    version="1.0.0",
+# MCP Protocol imports
+from mcp.server import Server
+from mcp.server.models import InitializationOptions
+from mcp.server.stdio import stdio_server
+from mcp.types import (
+    Resource,
+    Tool,
+    TextContent,
+    ImageContent,
+    EmbeddedResource,
+    LoggingLevel
 )
+from pydantic import BaseModel, Field
 
-# =========================
-# Config / ENV
-# =========================
-HOST = os.getenv("FASTMCP_HOST", "0.0.0.0")
-PORT = int(os.getenv("FASTMCP_PORT", "8082"))
-SSE_PATH = os.getenv("SSE_PATH", "/sse-paperstream")
-RESULT_PATH = os.getenv("RESULT_PATH", "/paper-result")
-HEALTH_PATH = os.getenv("HEALTH_PATH", "/health")
-HMAC_SECRET = os.getenv("PAPERSTREAM_HMAC", "")  # optional
-ASSIGN_TTL = int(os.getenv("ASSIGN_TTL", "120"))  # seconds
-MAX_INFLIGHT_PER_CLIENT = int(os.getenv("MAX_INFLIGHT_PER_CLIENT", "2"))
+# Logging Setup
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# =========================
-# State (in-memory)
-# =========================
-class Assignment(BaseModel):
-    job_id: str
-    assignment_id: str
-    item: Dict[str, Any]
-    status: str = "queued"   # queued|assigned|done|expired
-    client_id: str | None = None
-    created_at: float = Field(default_factory=lambda: time.time())
-    updated_at: float = Field(default_factory=lambda: time.time())
-    deadline: float = 0.0
+# Data Models
+@dataclass
+class IoTDevice:
+    device_id: str
+    capabilities: Dict[str, Any]  # CPU, RAM, network_speed, etc.
+    status: str  # 'idle', 'busy', 'offline'
+    last_seen: datetime
+    current_task: Optional[str] = None
+    performance_score: float = 1.0
 
-class Job(BaseModel):
-    job_id: str
-    items: List[Dict[str, Any]]
-    k: int = 2
-    assignments: List[Assignment] = Field(default_factory=list)
-    closed: bool = False
-    created_at: float = Field(default_factory=lambda: time.time())
+@dataclass
+class MiningTask:
+    task_id: str
+    algorithm: str  # 'sha256', 'scrypt', etc.
+    difficulty: int
+    target_hash: str
+    nonce_range_start: int
+    nonce_range_end: int
+    assigned_device: Optional[str] = None
+    status: str = 'pending'  # 'pending', 'assigned', 'completed', 'failed'
+    created_at: datetime = None
+    game_context: Optional[Dict] = None  # Link to game state
+    
+    def __post_init__(self):
+        if self.created_at is None:
+            self.created_at = datetime.now()
 
-clients_queues: Dict[str, asyncio.Queue] = {}
-clients_inflight: Dict[str, int] = {}
-jobs: Dict[str, Job] = {}
-pending_assignments: List[Assignment] = []  # wartet auf freie/verbundene Clients
+@dataclass
+class GameState:
+    player_id: str
+    position: Dict[str, float]  # x, y coordinates
+    actions: List[str]  # recent player actions
+    score: int
+    level: int
+    mining_contributions: int = 0
+    current_dungeon: Optional[str] = None
 
-# =========================
-# Helpers
-# =========================
-def _now_ms() -> int:
-    return int(time.time() * 1000)
+class GameMiningServer:
+    """Enhanced MCP Server for Game-Mining coordination"""
+    
+    def __init__(self):
+        self.devices: Dict[str, IoTDevice] = {}
+        self.mining_tasks: Dict[str, MiningTask] = {}
+        self.game_states: Dict[str, GameState] = {}
+        self.active_connections: Dict[str, Any] = {}
+        
+        # Initialize MCP Server
+        self.server = Server("game-mining-mcp")
+        self.setup_handlers()
+    
+    def setup_handlers(self):
+        """Setup MCP protocol handlers"""
+        
+        # Resource handlers
+        @self.server.list_resources()
+        async def list_resources() -> List[Resource]:
+            """List available resources"""
+            return [
+                Resource(
+                    uri="game://devices",
+                    name="IoT Devices",
+                    description="Connected IoT devices and their status",
+                    mimeType="application/json"
+                ),
+                Resource(
+                    uri="game://mining-tasks",
+                    name="Mining Tasks",
+                    description="Active and completed mining tasks",
+                    mimeType="application/json"
+                ),
+                Resource(
+                    uri="game://game-states",
+                    name="Game States",
+                    description="Current player game states",
+                    mimeType="application/json"
+                )
+            ]
+        
+        @self.server.read_resource()
+        async def read_resource(uri: str) -> str:
+            """Read resource content"""
+            if uri == "game://devices":
+                return json.dumps({"devices": [asdict(device) for device in self.devices.values()]}, default=str)
+            elif uri == "game://mining-tasks":
+                return json.dumps({"tasks": [asdict(task) for task in self.mining_tasks.values()]}, default=str)
+            elif uri == "game://game-states":
+                return json.dumps({"states": [asdict(state) for state in self.game_states.values()]}, default=str)
+            else:
+                raise ValueError(f"Unknown resource: {uri}")
+        
+        # Tool handlers
+        @self.server.list_tools()
+        async def list_tools() -> List[Tool]:
+            """List available tools"""
+            return [
+                Tool(
+                    name="register_device",
+                    description="Register a new IoT device",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "device_id": {"type": "string"},
+                            "capabilities": {"type": "object"},
+                        },
+                        "required": ["device_id", "capabilities"]
+                    }
+                ),
+                Tool(
+                    name="create_mining_task",
+                    description="Create a new mining task from game context",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "player_id": {"type": "string"},
+                            "game_action": {"type": "string"},
+                            "difficulty": {"type": "integer"},
+                        },
+                        "required": ["player_id", "game_action"]
+                    }
+                ),
+                Tool(
+                    name="update_game_state",
+                    description="Update player game state",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "player_id": {"type": "string"},
+                            "position": {"type": "object"},
+                            "action": {"type": "string"},
+                        },
+                        "required": ["player_id", "action"]
+                    }
+                ),
+                Tool(
+                    name="assign_mining_task",
+                    description="Assign mining task to best available device",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "task_id": {"type": "string"},
+                        },
+                        "required": ["task_id"]
+                    }
+                ),
+                Tool(
+                    name="translate_game_to_mining",
+                    description="Convert game actions to mining parameters",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "player_actions": {"type": "array"},
+                            "game_context": {"type": "object"},
+                        },
+                        "required": ["player_actions"]
+                    }
+                )
+            ]
+        
+        @self.server.call_tool()
+        async def call_tool(name: str, arguments: dict) -> List[TextContent]:
+            """Handle tool calls"""
+            
+            if name == "register_device":
+                result = await self.register_device(
+                    arguments["device_id"], 
+                    arguments["capabilities"]
+                )
+                return [TextContent(type="text", text=json.dumps(result))]
+            
+            elif name == "create_mining_task":
+                result = await self.create_mining_task_from_game(
+                    arguments["player_id"],
+                    arguments["game_action"],
+                    arguments.get("difficulty", 1)
+                )
+                return [TextContent(type="text", text=json.dumps(result))]
+            
+            elif name == "update_game_state":
+                result = await self.update_game_state(
+                    arguments["player_id"],
+                    arguments.get("position", {}),
+                    arguments["action"]
+                )
+                return [TextContent(type="text", text=json.dumps(result))]
+            
+            elif name == "assign_mining_task":
+                result = await self.assign_mining_task(arguments["task_id"])
+                return [TextContent(type="text", text=json.dumps(result))]
+            
+            elif name == "translate_game_to_mining":
+                result = await self.translate_game_to_mining(
+                    arguments["player_actions"],
+                    arguments.get("game_context", {})
+                )
+                return [TextContent(type="text", text=json.dumps(result))]
+            
+            else:
+                raise ValueError(f"Unknown tool: {name}")
+    
+    # Core Business Logic
+    async def register_device(self, device_id: str, capabilities: Dict) -> Dict:
+        """Register new IoT device"""
+        device = IoTDevice(
+            device_id=device_id,
+            capabilities=capabilities,
+            status="idle",
+            last_seen=datetime.now()
+        )
+        self.devices[device_id] = device
+        
+        logger.info(f"Registered device: {device_id} with capabilities: {capabilities}")
+        return {"status": "success", "device_id": device_id, "message": "Device registered"}
+    
+    async def create_mining_task_from_game(self, player_id: str, game_action: str, difficulty: int = 1) -> Dict:
+        """Create mining task based on game action"""
+        
+        # Generate task parameters from game context
+        task_id = f"task_{int(time.time())}_{random.randint(1000, 9999)}"
+        
+        # Map game action to mining parameters
+        mining_params = self.game_action_to_mining_params(game_action, difficulty)
+        
+        task = MiningTask(
+            task_id=task_id,
+            algorithm=mining_params["algorithm"],
+            difficulty=mining_params["difficulty"],
+            target_hash=mining_params["target_hash"],
+            nonce_range_start=mining_params["nonce_start"],
+            nonce_range_end=mining_params["nonce_end"],
+            game_context={"player_id": player_id, "action": game_action}
+        )
+        
+        self.mining_tasks[task_id] = task
+        
+        logger.info(f"Created mining task {task_id} for player {player_id} action: {game_action}")
+        return {"status": "success", "task_id": task_id, "mining_params": mining_params}
+    
+    def game_action_to_mining_params(self, action: str, difficulty: int) -> Dict:
+        """Convert game action to mining parameters"""
+        
+        # Base parameters
+        base_difficulty = 1000 * difficulty
+        
+        # Action-specific modifications
+        action_modifiers = {
+            "move_up": {"nonce_modifier": 0x1000, "algo": "sha256"},
+            "move_down": {"nonce_modifier": 0x2000, "algo": "sha256"},
+            "move_left": {"nonce_modifier": 0x3000, "algo": "sha256"},
+            "move_right": {"nonce_modifier": 0x4000, "algo": "sha256"},
+            "attack": {"nonce_modifier": 0x5000, "algo": "sha256"},
+            "collect_item": {"nonce_modifier": 0x6000, "algo": "sha256"},
+        }
+        
+        modifier = action_modifiers.get(action, {"nonce_modifier": 0x1000, "algo": "sha256"})
+        
+        # Generate target hash (simplified)
+        target_data = f"{action}_{difficulty}_{int(time.time())}"
+        target_hash = hashlib.sha256(target_data.encode()).hexdigest()
+        
+        return {
+            "algorithm": modifier["algo"],
+            "difficulty": base_difficulty,
+            "target_hash": target_hash[:16] + "0" * 48,  # Simplified target
+            "nonce_start": modifier["nonce_modifier"],
+            "nonce_end": modifier["nonce_modifier"] + 100000
+        }
+    
+    async def update_game_state(self, player_id: str, position: Dict, action: str) -> Dict:
+        """Update player game state"""
+        
+        if player_id not in self.game_states:
+            self.game_states[player_id] = GameState(
+                player_id=player_id,
+                position=position,
+                actions=[],
+                score=0,
+                level=1
+            )
+        
+        state = self.game_states[player_id]
+        state.position.update(position)
+        state.actions.append(action)
+        
+        # Keep only last 10 actions
+        if len(state.actions) > 10:
+            state.actions = state.actions[-10:]
+        
+        logger.info(f"Updated game state for player {player_id}: {action}")
+        return {"status": "success", "player_id": player_id, "current_state": asdict(state)}
+    
+    async def assign_mining_task(self, task_id: str) -> Dict:
+        """Assign mining task to best available device"""
+        
+        if task_id not in self.mining_tasks:
+            return {"status": "error", "message": "Task not found"}
+        
+        task = self.mining_tasks[task_id]
+        
+        # Find best available device
+        available_devices = [
+            device for device in self.devices.values() 
+            if device.status == "idle"
+        ]
+        
+        if not available_devices:
+            return {"status": "error", "message": "No available devices"}
+        
+        # Select device with highest performance score
+        best_device = max(available_devices, key=lambda d: d.performance_score)
+        
+        # Assign task
+        task.assigned_device = best_device.device_id
+        task.status = "assigned"
+        best_device.status = "busy"
+        best_device.current_task = task_id
+        
+        logger.info(f"Assigned task {task_id} to device {best_device.device_id}")
+        return {
+            "status": "success", 
+            "task_id": task_id, 
+            "assigned_device": best_device.device_id
+        }
+    
+    async def translate_game_to_mining(self, player_actions: List[str], game_context: Dict) -> Dict:
+        """Translate game actions to mining parameters"""
+        
+        # Combine multiple actions into mining strategy
+        action_sequence = "_".join(player_actions[-5:])  # Last 5 actions
+        
+        # Generate mining parameters based on action sequence
+        sequence_hash = hashlib.md5(action_sequence.encode()).hexdigest()
+        
+        # Use hash to determine mining parameters
+        nonce_base = int(sequence_hash[:8], 16)
+        difficulty_modifier = len(set(player_actions)) * 100  # Unique actions increase difficulty
+        
+        mining_strategy = {
+            "recommended_algorithm": "sha256",
+            "nonce_range_start": nonce_base,
+            "nonce_range_end": nonce_base + 50000,
+            "difficulty_modifier": difficulty_modifier,
+            "action_sequence": action_sequence,
+            "optimization_hint": self.get_optimization_hint(player_actions)
+        }
+        
+        return {"status": "success", "mining_strategy": mining_strategy}
+    
+    def get_optimization_hint(self, actions: List[str]) -> str:
+        """Provide optimization hints based on action patterns"""
+        
+        if not actions:
+            return "random_search"
+        
+        # Analyze action patterns
+        action_counts = {}
+        for action in actions:
+            action_counts[action] = action_counts.get(action, 0) + 1
+        
+        most_common = max(action_counts, key=action_counts.get)
+        
+        hints = {
+            "move_up": "linear_increment",
+            "move_down": "linear_decrement", 
+            "move_left": "bit_shift_left",
+            "move_right": "bit_shift_right",
+            "attack": "aggressive_search",
+            "collect_item": "targeted_search"
+        }
+        
+        return hints.get(most_common, "balanced_search")
 
-def _hmac(payload: str) -> str:
-    if not HMAC_SECRET:
-        return ""
-    return hmac.new(HMAC_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+# Main execution
+async def main():
+    """Main entry point"""
+    game_mining_server = GameMiningServer()
+    
+    # Run MCP server
+    async with stdio_server() as (read_stream, write_stream):
+        await game_mining_server.server.run(
+            read_stream,
+            write_stream,
+            InitializationOptions(
+                server_name="game-mining-mcp",
+                server_version="1.0.0",
+                capabilities=game_mining_server.server.get_capabilities(
+                    notification_options=None,
+                    experimental_capabilities=None,
+                )
+            )
+        )
 
-def _best_client_id() -> str | None:
-    if not clients_queues:
-        return None
-    return min(clients_queues.keys(), key=lambda c: clients_inflight.get(c, 0))
-
-async def _assign_to_client_or_pending(asg: Assignment):
-    cid = _best_client_id()
-    if cid is None or clients_inflight.get(cid, 0) >= MAX_INFLIGHT_PER_CLIENT:
-        pending_assignments.append(asg)
-        return
-    await _deliver(cid, asg)
-
-async def _deliver(client_id: str, asg: Assignment):
-    clients_inflight[client_id] = clients_inflight.get(client_id, 0) + 1
-    asg.client_id = client_id
-    asg.status = "assigned"
-    asg.updated_at = time.time()
-    asg.deadline = time.time() + ASSIGN_TTL
-    await clients_queues[client_id].put({
-        "type": "assignment",
-        "job_id": asg.job_id,
-        "assignment_id": asg.assignment_id,
-        "item": asg.item,
-        "ttl_s": ASSIGN_TTL,
-        "sig": _hmac(asg.assignment_id),
-    })
-    asyncio.create_task(_watch_expiry(asg))
-
-async def _drain_pending():
-    if not pending_assignments:
-        return
-    remaining: List[Assignment] = []
-    for asg in pending_assignments:
-        cid = _best_client_id()
-        if cid is None or clients_inflight.get(cid, 0) >= MAX_INFLIGHT_PER_CLIENT:
-            remaining.append(asg)
-        else:
-            await _deliver(cid, asg)
-    pending_assignments.clear()
-    pending_assignments.extend(remaining)
-
-async def _watch_expiry(asg: Assignment):
-    await asyncio.sleep(max(1, ASSIGN_TTL))
-    if asg.status in ("done", "expired"):
-        return
-    asg.status = "expired"
-    if asg.client_id:
-        clients_inflight[asg.client_id] = max(0, clients_inflight.get(asg.client_id, 1) - 1)
-    job = jobs.get(asg.job_id)
-    if job and not job.closed:
-        new_asg = Assignment(job_id=asg.job_id, assignment_id=f"a_{_now_ms()}", item=asg.item)
-        job.assignments.append(new_asg)
-        await _assign_to_client_or_pending(new_asg)
-
-# =========================
-# MCP Tools (ohne 'parameters' im Decorator; n8n-kompatible Signaturen)
-# =========================
-@mcp.tool(tags={"public"})
-async def paperstream_enqueue(items: list, k: float = 2) -> dict:
-    """
-    Enqueue papers for distribution to SSE clients.
-    items: list of {"paper_url": str, "question": str}
-    k: number of replicas per item (will be coerced to int >=1)
-    returns: { job_id, k, items, assignments }
-    """
-    try:
-        k_int = int(k or 2)
-    except Exception:
-        k_int = 2
-    if k_int < 1:
-        k_int = 1
-
-    job_id = f"j_{_now_ms()}"
-    # input sanitisieren
-    safe_items: list[dict] = []
-    for it in (items or []):
-        if isinstance(it, dict) and it.get("paper_url") and it.get("question"):
-            safe_items.append({"paper_url": str(it["paper_url"]), "question": str(it["question"])} )
-
-    job = Job(job_id=job_id, items=safe_items, k=k_int)
-    jobs[job_id] = job
-
-    for it in safe_items:
-        for i in range(job.k):
-            aid = f"a_{_now_ms()}_{i}"
-            asg = Assignment(job_id=job_id, assignment_id=aid, item=it)
-            job.assignments.append(asg)
-            await _assign_to_client_or_pending(asg)
-
-    return {
-        "job_id": job_id,
-        "k": job.k,
-        "items": len(safe_items),
-        "assignments": len(job.assignments),
-    }
-
-@mcp.tool(tags={"public"})
-async def paperstream_enqueue_json(items_json: str, k: float = 2) -> dict:
-    try:
-        payload = json.loads(items_json or "[]")
-        assert isinstance(payload, list)
-    except Exception:
-        return {"error":"items_json must be a JSON array of {paper_url,question}"}
-    return await paperstream_enqueue(payload, k)
-
-
-# =========================
-# HTTP Routes (SSE + Result)
-# =========================
-@mcp.custom_route(HEALTH_PATH, methods=["GET"])
-async def health(_: Request) -> PlainTextResponse:
-    return PlainTextResponse("OK")
-
-@mcp.custom_route(SSE_PATH, methods=["GET"])
-async def sse(request: Request) -> StreamingResponse:
-    """
-    Unity/Edge Clients verbinden sich hier per SSE und erhalten Assignments.
-    """
-    client_id = request.query_params.get("client_id", f"client_{_now_ms()}")
-    q: asyncio.Queue = asyncio.Queue()
-    clients_queues[client_id] = q
-    clients_inflight.setdefault(client_id, 0)
-
-    async def gen():
-        yield f"data: {json.dumps({'type':'hello','client_id':client_id})}\n\n"
-        await _drain_pending()
-        try:
-            while True:
-                msg = await q.get()
-                yield f"data: {json.dumps(msg)}\n\n"
-        except asyncio.CancelledError:
-            pass
-        finally:
-            clients_queues.pop(client_id, None)
-            clients_inflight.pop(client_id, None)
-
-    return StreamingResponse(gen(), media_type="text/event-stream")
-
-@mcp.custom_route(RESULT_PATH, methods=["POST"])
-async def receive_result(request: Request) -> JSONResponse:
-    body = await request.json()
-    assignment_id = body.get("assignment_id")
-    job_id = body.get("job_id")
-    result = body.get("result")
-    conf = body.get("conf", 0)
-    device = body.get("device_id", "unknown")
-    sig = body.get("sig", "")
-
-    try:
-        conf = float(conf)
-    except Exception:
-        conf = 0.0
-
-    if HMAC_SECRET:
-        expect = _hmac(assignment_id or "")
-        if sig != expect:
-            return JSONResponse({"ok": False, "error": "invalid signature"}, status_code=401)
-    if not assignment_id or not job_id or job_id not in jobs:
-        return JSONResponse({"ok": False, "error": "bad ids"}, status_code=400)
-
-    job = jobs[job_id]
-    for a in job.assignments:
-        if a.assignment_id == assignment_id:
-            a.status = "done"
-            a.updated_at = time.time()
-            if a.client_id:
-                clients_inflight[a.client_id] = max(0, clients_inflight.get(a.client_id, 1) - 1)
-            # votes sammeln
-            if "votes" not in a.item:
-                a.item["votes"] = []
-            a.item["votes"].append({"result": result, "conf": conf, "device": device})
-
-    finished = 0
-    for it in job.items:
-        if len(it.get("votes", [])) >= job.k:
-            finished += 1
-    if finished == len(job.items):
-        job.closed = True
-
-    return JSONResponse({"ok": True, "job_closed": job.closed})
-
-# =========================
-# Main – identisch zu deiner server.py
-# =========================
 if __name__ == "__main__":
-    transport = os.getenv("FASTMCP_TRANSPORT", "http").lower()  # 'http' oder 'stdio'
-    if transport == "stdio":
-        mcp.run(transport="stdio")
+    import os
+    mode = os.environ.get("MCP_MODE", "http").lower()
+    if mode == "stdio":
+        asyncio.run(main())
     else:
-        host = os.getenv("FASTMCP_HOST", "0.0.0.0")
-        port = int(os.getenv("FASTMCP_PORT", str(PORT)))
-        mcp.run(transport="http", host=host, port=port)
+        # HTTP-Modus für Docker/Produktivbetrieb
+        game_mining_server = GameMiningServer()
+        host = os.environ.get("FASTMCP_HOST", "0.0.0.0")
+        port = int(os.environ.get("FASTMCP_PORT", "8082"))
+        import uvicorn
+        uvicorn.run(game_mining_server.server.app, host=host, port=port)

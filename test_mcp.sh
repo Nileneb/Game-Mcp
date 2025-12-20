@@ -1,38 +1,20 @@
 #!/bin/bash
-# Testskript für alle Funktionen des MCP-Servers
-# Annahme: Der Server läuft lokal auf Port 5000
+# Testskript für die wichtigsten Funktionen des neuen MCP-Servers
+# Annahme: Der Server läuft lokal auf Port 8082
 
-BASE_URL="http://localhost:5000"
+BASE_URL="http://localhost:8082"
 
-# Test: /entities (GET)
-echo "Test: GET /entities"
-curl -s -X GET "$BASE_URL/entities" | jq
-
-echo "-----------------------------"
-
-# Test: /entities (POST)
-echo "Test: POST /entities"
-RESPONSE=$(curl -s -X POST "$BASE_URL/entities" -H "Content-Type: application/json" -d '{"name": "TestEntity", "type": "test"}')
+echo "Test: Enqueue Job via /paperstream_enqueue"
+RESPONSE=$(curl -s -X POST "$BASE_URL/paperstream_enqueue" -H "Content-Type: application/json" -d '{"items": [{"paper_url": "https://example.com/paper.pdf", "question": "Was steht auf Seite 1?"}], "k": 1}')
 echo "$RESPONSE" | jq
-ENTITY_ID=$(echo "$RESPONSE" | jq -r '.id')
+JOB_ID=$(echo "$RESPONSE" | jq -r '.job_id')
 
 echo "-----------------------------"
 
-# Test: /entities/<id> (GET)
-echo "Test: GET /entities/$ENTITY_ID"
-curl -s -X GET "$BASE_URL/entities/$ENTITY_ID" | jq
-
-echo "-----------------------------"
-
-# Test: /entities/<id> (PUT)
-echo "Test: PUT /entities/$ENTITY_ID"
-curl -s -X PUT "$BASE_URL/entities/$ENTITY_ID" -H "Content-Type: application/json" -d '{"name": "UpdatedEntity", "type": "test"}' | jq
-
-echo "-----------------------------"
-
-# Test: /entities/<id> (DELETE)
-echo "Test: DELETE /entities/$ENTITY_ID"
-curl -s -X DELETE "$BASE_URL/entities/$ENTITY_ID" | jq
+echo "Test: Ergebnis abliefern via /paper-result (simuliert)"
+ASSIGNMENT_ID="a_test_assignment"
+RESULT_PAYLOAD='{"assignment_id": "'$ASSIGNMENT_ID'", "job_id": "'$JOB_ID'", "result": {"answer": "Testantwort", "timestamp": 1234567890}, "conf": 1.0, "device_id": "testdevice", "sig": ""}'
+curl -s -X POST "$BASE_URL/paper-result" -H "Content-Type: application/json" -d "$RESULT_PAYLOAD" | jq
 
 echo "-----------------------------"
 

@@ -1,8 +1,8 @@
 version: '3.8'
 services:
-  paperstream:
+  game-mining-mcp:
     build: .
-    container_name: paperstream
+    container_name: game-mining-mcp
     environment:
       - FASTMCP_HOST=0.0.0.0
       - FASTMCP_PORT=8082
@@ -11,16 +11,36 @@ services:
       - ASSIGN_TTL=120
       - MAX_INFLIGHT_PER_CLIENT=2
       - PAPERSTREAM_HMAC=${PAPERSTREAM_HMAC:-}
+      - MINING_DB_PATH=/app/data/mining.db
+      - LOG_LEVEL=INFO
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
     ports:
       - "8082:8082"
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
     restart: unless-stopped
 
   iot-test:
     build: .
     container_name: iot-test
     depends_on:
-      - paperstream
+      - game-mining-mcp
     entrypoint: ["/bin/sh", "-c", "python -m venv /venv && . /venv/bin/activate && pip install --upgrade pip && pip install requests sseclient && sleep 5 && python /app/simulate_iot_device.py"]
     environment:
-      - FASTMCP_HOST=paperstream
+      - FASTMCP_HOST=game-mining-mcp
     restart: "no"
+
+volumes:
+  redis_data:
