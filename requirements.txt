@@ -2,3 +2,4 @@ fastmcp
 python-dotenv
 pydantic
 starlette
+sseclient
