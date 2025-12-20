@@ -4,13 +4,17 @@ Testskript für MCP-Server: Tools und Ressourcen via MCP-Protokoll (HTTP)
 """
 import asyncio
 import json
-from mcp.client import Client
+
+# Use fastmcp for HTTP-based MCP client
+from fastmcp.client.client import Client
+from fastmcp.client.transports import StreamableHttpTransport
 
 MCP_URL = "http://localhost:8082"  # oder Container-Host
 
+
 async def main():
-    client = Client(MCP_URL)
-    await client.connect()
+    transport = StreamableHttpTransport(MCP_URL)
+    client = Client(transport)
 
     print("== Ressourcen auflisten ==")
     resources = await client.list_resources()
