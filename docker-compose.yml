@@ -1,0 +1,16 @@
+version: '3.8'
+services:
+  paperstream:
+    build: .
+    container_name: paperstream
+    environment:
+      - FASTMCP_HOST=0.0.0.0
+      - FASTMCP_PORT=8082
+      - SSE_PATH=/sse-paperstream
+      - RESULT_PATH=/paper-result
+      - ASSIGN_TTL=120
+      - MAX_INFLIGHT_PER_CLIENT=2
+      - PAPERSTREAM_HMAC=${PAPERSTREAM_HMAC:-}
+    ports:
+      - "8082:8082"
+    restart: unless-stopped
