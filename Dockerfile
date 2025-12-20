@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # app
 COPY server.py ./server.py
+COPY simulate_iot_device.py ./simulate_iot_device.py
 
 ENV FASTMCP_HOST=0.0.0.0 \
     FASTMCP_PORT=8082 \

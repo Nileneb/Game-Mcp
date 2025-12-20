@@ -20,7 +20,7 @@ services:
     container_name: iot-test
     depends_on:
       - paperstream
-    entrypoint: ["/bin/sh", "-c", "pip install requests sseclient && sleep 5 && python /app/simulate_iot_device.py"]
+    entrypoint: ["/bin/sh", "-c", "python -m venv /venv && . /venv/bin/activate && pip install --upgrade pip && pip install requests sseclient && sleep 5 && python /app/simulate_iot_device.py"]
     environment:
       - FASTMCP_HOST=paperstream
     restart: "no"

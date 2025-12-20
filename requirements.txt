@@ -2,4 +2,5 @@ fastmcp
 python-dotenv
 pydantic
 starlette
+sseclient==0.0.22
 sseclient

@@ -3,27 +3,13 @@
 Simuliert ein IoT-Device, das sich per SSE mit dem MCP verbindet und Assignments empfängt.
 Sendet anschließend ein Ergebnis zurück.
 """
-import requests
 import sseclient
 import json
 import time
-import uuid
+import requests
 
-MCP_SSE_URL = "http://localhost:8082/sse-paperstream?client_id=testdevice"
-MCP_RESULT_URL = "http://localhost:8082/paper-result"
-
-# Schritt 1: Mit SSE verbinden und auf Assignments warten
-def listen_for_assignments():
-    print(f"Verbinde zu {MCP_SSE_URL} ...")
-    response = requests.get(MCP_SSE_URL, stream=True)
-    client = sseclient.SSEClient(response)
-    for event in client.events():
-        print(f"Empfangen: {event.data}")
-        data = json.loads(event.data)
-        if data.get("type") == "assignment":
-            # Assignment empfangen, Ergebnis senden
-            send_result(data)
-            break
+MCP_SSE_URL = "http://192.168.178.12:8082/sse-paperstream?client_id=testdevice"
+MCP_RESULT_URL = "http://192.168.178.12:8082/paper-result"
 
 def send_result(assignment):
     payload = {
@@ -39,4 +25,11 @@ def send_result(assignment):
     print(f"Server-Antwort: {r.text}")
 
 if __name__ == "__main__":
-    listen_for_assignments()
+    print(f"Verbinde zu {MCP_SSE_URL} ...")
+    client = sseclient.SSEClient(MCP_SSE_URL)
+    for event in client:
+        print(f"Empfangen: {event.data}")
+        data = json.loads(event.data)
+        if data.get("type") == "assignment":
+            send_result(data)
+            break
