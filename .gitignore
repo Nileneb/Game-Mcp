@@ -10,3 +10,5 @@ __pycache__/
 old/
 logs/
 *.log
+private.pem
+public.pem

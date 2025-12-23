@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MCP Job Server - FastMCP Version (wie Paperstream Beispiel)
+MCP Job Server - FastMCP mit http_app() + uvicorn
 ============================================================
 
 Tools:
@@ -21,8 +21,7 @@ from typing import Any, Dict, List
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 from pydantic import BaseModel, Field
-from starlette.requests import Request
-from starlette.responses import PlainTextResponse, JSONResponse
+import uvicorn
 
 # Import shared state
 from shared_state import state, Assignment, Job
@@ -40,11 +39,9 @@ mcp = FastMCP(
 # =========================
 HOST = os.getenv("FASTMCP_HOST", "0.0.0.0")
 PORT = int(os.getenv("FASTMCP_PORT", "8082"))
-SSE_PATH = "/sse"
-HEALTH_PATH = "/health"
 
 # =========================
-# MCP Tools (wie Paperstream Beispiel - ohne 'parameters' im Decorator)
+# MCP Tools
 # =========================
 
 @mcp.tool(tags={"public"})
@@ -196,16 +193,7 @@ async def list_devices() -> dict:
     return {"devices": devices, "count": len(devices)}
 
 # =========================
-# HTTP Routes
-# =========================
-
-@mcp.custom_route(HEALTH_PATH, methods=["GET"])
-async def health(_: Request) -> PlainTextResponse:
-    status = await get_pool_status()
-    return PlainTextResponse(f"OK - Height: {status['blockchain']['height']}, Jobs: {status['pool']['active_jobs']}")
-
-# =========================
-# Main – wie dein Paperstream Beispiel
+# Main – RICHTIGE LÖSUNG!
 # =========================
 
 if __name__ == "__main__":
@@ -216,7 +204,7 @@ if __name__ == "__main__":
     print()
     print(f"🔗 n8n MCP Client Tool:")
     print(f"   Server Transport: HTTP Streamable")
-    print(f"   Endpoint: http://192.168.178.12:{PORT}{SSE_PATH}")
+    print(f"   Endpoint: http://{HOST}:{PORT}/sse")
     print()
     print("🔧 Tools:")
     print("   • create_mining_job")
@@ -228,10 +216,6 @@ if __name__ == "__main__":
     print("=" * 70)
     print()
     
-    transport = os.getenv("FASTMCP_TRANSPORT", "http").lower()
-    if transport == "stdio":
-        mcp.run(transport="stdio")
-    else:
-        host = os.getenv("FASTMCP_HOST", HOST)
-        port = int(os.getenv("FASTMCP_PORT", str(PORT)))
-        mcp.run(transport="http", host=host, port=port)
+    # RICHTIGE LÖSUNG: http_app() + uvicorn!
+    app = mcp.http_app(transport="streamable-http")
+    uvicorn.run(app, host=HOST, port=PORT)
