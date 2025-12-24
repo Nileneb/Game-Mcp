@@ -6,17 +6,22 @@ services:
     environment:
       - FASTMCP_HOST=0.0.0.0
       - FASTMCP_PORT=8082
-      - SSE_PATH=/sse-paperstream
-      - RESULT_PATH=/paper-result
+      - DEVICE_SERVER_HOST=0.0.0.0
+      - DEVICE_SERVER_PORT=8083
       - ASSIGN_TTL=120
       - MAX_INFLIGHT_PER_CLIENT=2
-      - PAPERSTREAM_HMAC=${PAPERSTREAM_HMAC:-}
-      - MINING_DB_PATH=/app/data/mining.db
       - LOG_LEVEL=INFO
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      # Real mining (optional)
+      # - REAL_MINING_ENABLED=1
+      # - XMR_WALLET_ADDRESS=...
+      # - POOL_HOST=xmr-eu1.nanopool.org
+      # - POOL_PORT=10300
+      # - WORKER_NAME=game-mcp
     ports:
       - "8082:8082"
+      - "8083:8083"
     volumes:
       - ./data:/app/data
     depends_on:
