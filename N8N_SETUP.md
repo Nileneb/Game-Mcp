@@ -185,7 +185,7 @@ Alle verbundenen Mining Devices.
 
 **Lösung:**
 1. Prüfe Server-Logs
-2. Stelle sicher, dass FASTMCP_SERVER_HOST und FASTMCP_SERVER_PORT in .env gesetzt sind
+2. Stelle sicher, dass FASTMCP_HOST und FASTMCP_PORT in .env gesetzt sind
 3. Neustart des Servers: `./start_mining.sh`
 
 ## Environment Setup
@@ -194,9 +194,9 @@ Die Server-Konfiguration erfolgt über `.env`:
 
 ```bash
 # FastMCP Job Server (n8n)
-FASTMCP_SERVER_HOST=0.0.0.0
-FASTMCP_SERVER_PORT=8082
-FASTMCP_SERVER_LOG_LEVEL=INFO
+FASTMCP_HOST=0.0.0.0
+FASTMCP_PORT=8082
+# FASTMCP_LOG_LEVEL=INFO
 
 # Device Server (Unity)
 DEVICE_SERVER_HOST=0.0.0.0

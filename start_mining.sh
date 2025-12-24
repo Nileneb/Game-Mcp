@@ -38,10 +38,24 @@ else
 fi
 
 # Basic validation
+# Backward-compat: map deprecated FASTMCP_SERVER_* to canonical names
+if [ -z "$FASTMCP_HOST" ] && [ -n "$FASTMCP_SERVER_HOST" ]; then
+    echo "⚠️  Using deprecated FASTMCP_SERVER_HOST. Please switch to FASTMCP_HOST."
+    export FASTMCP_HOST="$FASTMCP_SERVER_HOST"
+fi
+if [ -z "$FASTMCP_PORT" ] && [ -n "$FASTMCP_SERVER_PORT" ]; then
+    echo "⚠️  Using deprecated FASTMCP_SERVER_PORT. Please switch to FASTMCP_PORT."
+    export FASTMCP_PORT="$FASTMCP_SERVER_PORT"
+fi
+if [ -z "$FASTMCP_LOG_LEVEL" ] && [ -n "$FASTMCP_SERVER_LOG_LEVEL" ]; then
+    echo "⚠️  Using deprecated FASTMCP_SERVER_LOG_LEVEL. Please switch to FASTMCP_LOG_LEVEL."
+    export FASTMCP_LOG_LEVEL="$FASTMCP_SERVER_LOG_LEVEL"
+fi
+
 if [ -z "$FASTMCP_HOST" ] || [ -z "$FASTMCP_PORT" ]; then
-    echo "ℹ️ FASTMCP_HOST/FASTMCP_PORT not set, using defaults (0.0.0.0:8082)"
-    export FASTMCP_HOST="${FASTMCP_HOST:-0.0.0.0}"
-    export FASTMCP_PORT="${FASTMCP_PORT:-8082}"
+        echo "ℹ️ FASTMCP_HOST/FASTMCP_PORT not set, using defaults (0.0.0.0:8082)"
+        export FASTMCP_HOST="${FASTMCP_HOST:-0.0.0.0}"
+        export FASTMCP_PORT="${FASTMCP_PORT:-8082}"
 fi
 
 if [ "${REAL_MINING_ENABLED}" = "1" ]; then

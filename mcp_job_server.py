@@ -452,4 +452,10 @@ if __name__ == "__main__":
     print("   3. Transport: SSE")
     print("   4. Use tools via function calls")
     print("\n" + "=" * 70 + "\n")
-    mcp.run(transport="sse")
+    # Serve SSE app with uvicorn on configured host/port (bypasses FastMCP.run limitations)
+    try:
+        import uvicorn
+        sse_app = mcp.sse_app()
+        uvicorn.run(sse_app, host=HOST, port=PORT)
+    except Exception as e:
+        print(f"❌ Failed to start SSE server: {e}")
