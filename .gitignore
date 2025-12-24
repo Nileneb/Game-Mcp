@@ -7,10 +7,8 @@ __pycache__/
 *.pyd
 *.swp
 .DS_Store
-old/
 logs/
 *.log
 private.pem
 public.pem
 *.pem
-/realmining

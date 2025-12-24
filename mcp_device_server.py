@@ -58,7 +58,9 @@ async def handle_device_sse(request):
     
     Unity Device verbindet sich hier und bekommt Tasks per SSE gepusht!
     """
-    device_id = request.query.get("device_id", f"device_{uuid.uuid4().hex[:8]}")
+    device_id = request.query.get("device_id")
+    if not device_id:
+        return web.json_response({"error": "device_id required"}, status=400)
 
     logger.info(f"🎮 Device connected: {device_id}")
 
@@ -365,6 +367,9 @@ async def main():
     app.router.add_get('/sse', handle_device_sse)
     # Unity client compatibility path
     app.router.add_get('/sse/device', handle_device_sse)
+    
+    # Device Registration (Unity)
+    app.router.add_post('/device/register', handle_device_register)
     
     # Result Submission
     app.router.add_post('/result', handle_submit_result)

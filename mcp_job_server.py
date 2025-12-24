@@ -65,20 +65,92 @@ POOL_PORT = int(os.getenv("POOL_PORT", "10300"))
 WORKER_NAME = os.getenv("WORKER_NAME", "game-mcp")
 
 # =========================
+# Pydantic Models for Tool Schemas (n8n compatibility)
+# =========================
+
+class JobResponse(BaseModel):
+    """Response model for job creation"""
+    success: bool = Field(description="Whether job was created successfully")
+    job_id: str = Field(description="Unique job ID")
+    block_index: int = Field(description="Block index number")
+    difficulty: int = Field(description="Mining difficulty")
+    potential_reward: float = Field(description="Potential block reward")
+    tasks_created: int = Field(description="Number of tasks created")
+    message: str = Field(description="Human-readable status message")
+    error: str = Field(default="", description="Error message if failed")
+
+class PoolStatus(BaseModel):
+    """Response model for pool status"""
+    success: bool
+    blockchain: dict = Field(description="Blockchain status")
+    pool: dict = Field(description="Pool statistics")
+    recent_blocks: list = Field(description="Recent blocks")
+
+class LeaderboardEntry(BaseModel):
+    """Single leaderboard entry"""
+    rank: int
+    device_id: str
+    coins: float
+    blocks_found: int
+    tasks_completed: int
+
+class LeaderboardResponse(BaseModel):
+    """Response model for leaderboard"""
+    success: bool
+    leaderboard: List[LeaderboardEntry]
+    total_miners: int
+
+class DeviceInfo(BaseModel):
+    """Single device info"""
+    device_id: str
+    status: str
+    inflight: int
+    coins: float
+    blocks_found: int
+    tasks_completed: int
+
+class DeviceListResponse(BaseModel):
+    """Response model for device list"""
+    success: bool
+    total_devices: int
+    active_devices: int
+    devices: List[DeviceInfo]
+
+class JobDetails(BaseModel):
+    """Job details response"""
+    job_id: str
+    block_index: int
+    difficulty: int
+    reward: float
+    status: str
+    tasks_created: int
+    tasks_completed: int
+    progress: float
+    winner: str = ""
+    winning_hash: str = ""
+    created_at: str
+
+class JobDetailsResponse(BaseModel):
+    """Response model for job details"""
+    success: bool
+    job: JobDetails | None = None
+    error: str = ""
+
+# =========================
 # MCP Tools
 # =========================
 
 @mcp.tool()
-async def create_mining_job(num_tasks: int = 10, chunk_size: int = 1000000) -> dict:
+async def create_mining_job(num_tasks: float = 10, chunk_size: float = 1000000) -> JobResponse:
     """
     Erstellt einen neuen Mining Job und verteilt Tasks an verbundene Devices.
     
     Args:
-        num_tasks: Anzahl der Mining Tasks (default: 10)
+        num_tasks: Anzahl der Mining Tasks (default: 10, max: 100)
         chunk_size: Nonce-Range pro Task (default: 1000000)
     
     Returns:
-        dict: Job-Details mit success, job_id, block_index, difficulty, reward, tasks_created
+        JobResponse: Job-Details mit success, job_id, block_index, difficulty, reward, tasks_created
     """
     try:
         # Validiere Input
@@ -115,35 +187,38 @@ async def create_mining_job(num_tasks: int = 10, chunk_size: int = 1000000) -> d
         except Exception:
             pass
         
-        result = {
-            "success": True,
-            "job_id": job_id,
-            "block_index": block.index,
-            "difficulty": block.difficulty,
-            "potential_reward": float(block.reward),
-            "tasks_created": num_tasks_int,
-            "message": f"Mining job created for Block #{block.index} with {num_tasks_int} tasks"
-        }
-        
         print(f"✅ Created job {job_id} for block #{block.index}")
-        return result
+        return JobResponse(
+            success=True,
+            job_id=job_id,
+            block_index=block.index,
+            difficulty=block.difficulty,
+            potential_reward=float(block.reward),
+            tasks_created=num_tasks_int,
+            message=f"Mining job created for Block #{block.index} with {num_tasks_int} tasks"
+        )
         
     except Exception as e:
         error_msg = f"Failed to create mining job: {str(e)}"
         print(f"❌ {error_msg}")
-        return {
-            "success": False,
-            "error": error_msg,
-            "job_id": None
-        }
+        return JobResponse(
+            success=False,
+            job_id="",
+            block_index=0,
+            difficulty=0,
+            potential_reward=0.0,
+            tasks_created=0,
+            message=error_msg,
+            error=error_msg
+        )
 
 @mcp.tool()
-async def get_pool_status() -> dict:
+async def get_pool_status() -> PoolStatus:
     """
     Gibt den aktuellen Status des Mining Pools zurück.
     
     Returns:
-        dict: Pool-Status mit blockchain, pool und recent_blocks Informationen
+        PoolStatus: Pool-Status mit blockchain, pool und recent_blocks Informationen
     """
     try:
         active_jobs = [j for j in state.jobs.values() if j.status == "active"]
@@ -152,20 +227,20 @@ async def get_pool_status() -> dict:
         inflight = await get_all_inflight()
         pending_count = int(await r.llen("assignments:pending"))
         
-        result = {
-            "success": True,
-            "blockchain": {
+        return PoolStatus(
+            success=True,
+            blockchain={
                 "height": len(state.blockchain.chain),
                 "current_difficulty": state.blockchain.base_difficulty,
                 "pending_block": state.blockchain.pending_block is not None
             },
-            "pool": {
+            pool={
                 "active_jobs": len(active_jobs),
                 "pending_tasks": pending_count,
                 "total_devices": len(connected),
                 "active_devices": sum(1 for d in connected if inflight.get(d, 0) > 0)
             },
-            "recent_blocks": [
+            recent_blocks=[
                 {
                     "index": b.index,
                     "miner": b.miner or "unknown",
@@ -174,143 +249,133 @@ async def get_pool_status() -> dict:
                 }
                 for b in state.blockchain.chain[-5:]
             ]
-        }
-        
-        print(f"📊 Pool status: {len(active_jobs)} jobs, {len(state.device_queues)} devices")
-        return result
+        )
         
     except Exception as e:
         error_msg = f"Failed to get pool status: {str(e)}"
         print(f"❌ {error_msg}")
-        return {
-            "success": False,
-            "error": error_msg
-        }
+        return PoolStatus(
+            success=False,
+            blockchain={},
+            pool={},
+            recent_blocks=[]
+        )
 
 @mcp.tool()
-async def get_leaderboard() -> dict:
+async def get_leaderboard() -> LeaderboardResponse:
     """
     Gibt die Top-10 Miner mit ihren Stats zurück.
     
     Returns:
-        dict: Leaderboard mit Top-Minern sortiert nach Coins
+        LeaderboardResponse: Leaderboard mit Top-Minern sortiert nach Coins
     """
     try:
         leaders = await redis_get_leaderboard(10)
-        result = {
-            "success": True,
-            "leaderboard": leaders,
-            "total_miners": len(leaders)
-        }
-        
-        print(f"🏆 Leaderboard: {len(sorted_leaders)} miners")
-        return result
+        return LeaderboardResponse(
+            success=True,
+            leaderboard=[LeaderboardEntry(**entry) for entry in leaders],
+            total_miners=len(leaders)
+        )
         
     except Exception as e:
         error_msg = f"Failed to get leaderboard: {str(e)}"
         print(f"❌ {error_msg}")
-        return {
-            "success": False,
-            "error": error_msg,
-            "leaderboard": []
-        }
+        return LeaderboardResponse(
+            success=False,
+            leaderboard=[],
+            total_miners=0
+        )
 
 @mcp.tool()
-async def get_job_details(job_id: str) -> dict:
+async def get_job_details(job_id: str) -> JobDetailsResponse:
     """
     Gibt Details zu einem spezifischen Mining Job zurück.
     
     Args:
-        job_id: Die Job-ID (z.B. 'job_abc123')
+        job_id: Die Job-ID (z.B. 'job_1', 'job_2')
     
     Returns:
-        dict: Job-Details oder Fehlermeldung
+        JobDetailsResponse: Job-Details oder Fehlermeldung
     """
     try:
         if not job_id or not isinstance(job_id, str):
-            return {
-                "success": False,
-                "error": "Invalid job_id provided"
-            }
+            return JobDetailsResponse(
+                success=False,
+                error="Invalid job_id provided"
+            )
         
         if job_id not in state.jobs:
-            return {
-                "success": False,
-                "error": f"Job '{job_id}' not found",
-                "available_jobs": list(state.jobs.keys())[:5]
-            }
+            return JobDetailsResponse(
+                success=False,
+                error=f"Job '{job_id}' not found"
+            )
         
         job = state.jobs[job_id]
-        result = {
-            "success": True,
-            "job": {
-                "job_id": job.job_id,
-                "block_index": job.block_index,
-                "difficulty": job.difficulty,
-                "reward": float(job.reward),
-                "status": job.status,
-                "tasks_created": job.tasks_created,
-                "tasks_completed": job.tasks_completed,
-                "progress": round((job.tasks_completed / job.tasks_created * 100) if job.tasks_created > 0 else 0, 2),
-                "winner": job.winner,
-                "winning_hash": job.winning_hash,
-                "created_at": job.created_at
-            }
-        }
-        
-        print(f"📋 Job {job_id}: {job.status}, {job.tasks_completed}/{job.tasks_created} tasks")
-        return result
+        return JobDetailsResponse(
+            success=True,
+            job=JobDetails(
+                job_id=job.job_id,
+                block_index=job.block_index,
+                difficulty=job.difficulty,
+                reward=float(job.reward),
+                status=job.status,
+                tasks_created=job.tasks_created,
+                tasks_completed=job.tasks_completed,
+                progress=round((job.tasks_completed / job.tasks_created * 100) if job.tasks_created > 0 else 0, 2),
+                winner=job.winner,
+                winning_hash=job.winning_hash,
+                created_at=job.created_at
+            )
+        )
         
     except Exception as e:
         error_msg = f"Failed to get job details: {str(e)}"
         print(f"❌ {error_msg}")
-        return {
-            "success": False,
-            "error": error_msg
-        }
+        return JobDetailsResponse(
+            success=False,
+            error=error_msg
+        )
 
 @mcp.tool()
-async def list_devices() -> dict:
+async def list_devices() -> DeviceListResponse:
     """
     Listet alle aktuell verbundenen Mining Devices.
     
     Returns:
-        dict: Liste aller Devices mit Stats und Status
+        DeviceListResponse: Liste aller Devices mit Stats und Status
     """
     try:
         connected = await get_connected_devices()
         if not connected:
-            return {
-                "success": True,
-                "devices": [],
-                "count": 0,
-                "message": "No devices connected"
-            }
+            return DeviceListResponse(
+                success=True,
+                total_devices=0,
+                active_devices=0,
+                devices=[]
+            )
 
         inflight = await get_all_inflight()
-        devices: List[Dict[str, Any]] = []
+        devices_info: List[DeviceInfo] = []
         for device_id in connected:
             stats = await get_device_stats(device_id)
-            idx = await ensure_device_idx(device_id)
-            devices.append({
-                "device_id": device_id,
-                "device_idx": idx,
-                "connected": True,
-                "inflight_tasks": inflight.get(device_id, 0),
-                "stats": stats,
-            })
+            devices_info.append(DeviceInfo(
+                device_id=device_id,
+                status="active" if inflight.get(device_id, 0) > 0 else "idle",
+                inflight=inflight.get(device_id, 0),
+                coins=stats.get("coins", 0.0),
+                blocks_found=stats.get("blocks_found", 0),
+                tasks_completed=stats.get("tasks_completed", 0)
+            ))
 
-        devices.sort(key=lambda d: d["stats"]["coins"], reverse=True)
+        devices_info.sort(key=lambda d: d.coins, reverse=True)
 
-        result = {
-            "success": True,
-            "devices": devices,
-            "count": len(devices),
-            "active_count": sum(1 for d in devices if d["inflight_tasks"] > 0),
-        }
-        
-        print(f"🎮 Devices: {len(devices)} connected, {result['active_count']} active")
-        return result
+        print(f"🎮 Devices: {len(connected)} connected, {sum(1 for d in devices_info if d.status == 'active')} active")
+        return DeviceListResponse(
+            success=True,
+            total_devices=len(devices_info),
+            active_devices=sum(1 for d in devices_info if d.status == "active"),
+            devices=devices_info
+        )
         
     except Exception as e:
         error_msg = f"Failed to list devices: {str(e)}"
@@ -438,8 +503,11 @@ if __name__ == "__main__":
     print("📋 MCP JOB SERVER - n8n Integration")
     print("=" * 70)
     print("\n🔗 n8n MCP Client Configuration:")
-    print(f"   URL: http://{HOST}:{PORT}/sse")
-    print(f"   Transport: SSE (Server-Sent Events)")
+    print(f"   URL: http://{HOST}:{PORT}/mcp")
+    print("   Protocol: StreamableHTTP (JSON-RPC 2.0 over HTTP/SSE)")
+    print("   Required headers:")
+    print("     • Accept: application/json, text/event-stream")
+    print("     • mcp-session-id: <any unique id per run>")
     print("\n🔧 Available Tools:")
     print("   • create_mining_job(num_tasks, chunk_size)")
     print("   • get_pool_status()")
@@ -448,14 +516,14 @@ if __name__ == "__main__":
     print("   • list_devices()")
     print("\n💡 n8n Setup:")
     print("   1. Add 'MCP Client' tool node")
-    print(f"   2. Set URL: http://{HOST}:{PORT}/sse")
-    print("   3. Transport: SSE")
+    print(f"   2. Set URL: http://{HOST}:{PORT}/mcp")
+    print("   3. Transport/Protocol: HTTP (StreamableHTTP)")
     print("   4. Use tools via function calls")
     print("\n" + "=" * 70 + "\n")
-    # Serve SSE app with uvicorn on configured host/port (bypasses FastMCP.run limitations)
+    # Serve HTTP app on /mcp (FastMCP 2.14+ uses HTTP transport)
     try:
         import uvicorn
-        sse_app = mcp.sse_app()
-        uvicorn.run(sse_app, host=HOST, port=PORT)
+        http_app = mcp.http_app(path="/mcp")
+        uvicorn.run(http_app, host=HOST, port=PORT)
     except Exception as e:
-        print(f"❌ Failed to start SSE server: {e}")
+        print(f"❌ Failed to start HTTP server: {e}")

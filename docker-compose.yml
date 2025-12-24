@@ -1,24 +1,9 @@
-version: '3.8'
 services:
   game-mining-mcp:
     build: .
     container_name: game-mining-mcp
-    environment:
-      - FASTMCP_HOST=0.0.0.0
-      - FASTMCP_PORT=8082
-      - DEVICE_SERVER_HOST=0.0.0.0
-      - DEVICE_SERVER_PORT=8083
-      - ASSIGN_TTL=120
-      - MAX_INFLIGHT_PER_CLIENT=2
-      - LOG_LEVEL=INFO
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      # Real mining (optional)
-      # - REAL_MINING_ENABLED=1
-      # - XMR_WALLET_ADDRESS=...
-      # - POOL_HOST=xmr-eu1.nanopool.org
-      # - POOL_PORT=10300
-      # - WORKER_NAME=game-mcp
+    env_file:
+      - .env
     ports:
       - "8082:8082"
       - "8083:8083"
@@ -36,16 +21,6 @@ services:
     volumes:
       - redis_data:/data
     restart: unless-stopped
-
-  iot-test:
-    build: .
-    container_name: iot-test
-    depends_on:
-      - game-mining-mcp
-    entrypoint: ["/bin/sh", "-c", "python -m venv /venv && . /venv/bin/activate && pip install --upgrade pip && pip install requests sseclient && sleep 5 && python /app/simulate_iot_device.py"]
-    environment:
-      - FASTMCP_HOST=game-mining-mcp
-    restart: "no"
 
 volumes:
   redis_data:
