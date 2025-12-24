@@ -328,16 +328,22 @@ async def list_devices() -> dict:
 # =========================
 
 _stratum_client: StratumClient | None = None
+_stratum_started = False
 
 
-@mcp.on_event("startup")
-async def _start_stratum_if_enabled():
-    global _stratum_client
+def _ensure_stratum_started() -> None:
+    """Start Stratum client once in a background thread (compatible with older fastmcp)."""
+    import threading
+    global _stratum_client, _stratum_started
+    if _stratum_started:
+        return
     if not REAL_MINING_ENABLED:
         print("ℹ️ Real mining disabled. Set REAL_MINING_ENABLED=1 to enable.")
+        _stratum_started = True  # avoid repeated logging
         return
     if not XMR_WALLET:
         print("❌ REAL_MINING_ENABLED=1 but XMR_WALLET_ADDRESS is missing. Skipping Stratum start.")
+        _stratum_started = True
         return
     try:
         _stratum_client = StratumClient(
@@ -347,8 +353,13 @@ async def _start_stratum_if_enabled():
             worker_name=WORKER_NAME,
         )
         print(f"🚀 Starting Stratum client to {POOL_HOST}:{POOL_PORT} as {WORKER_NAME}")
-        # Fire and forget background task
-        asyncio.create_task(_stratum_client.run())
+
+        def _runner():
+            asyncio.run(_stratum_client.run())
+
+        t = threading.Thread(target=_runner, name="stratum-client", daemon=True)
+        t.start()
+        _stratum_started = True
     except Exception as e:
         print(f"❌ Failed to start Stratum client: {e}")
 
@@ -359,6 +370,7 @@ async def get_mining_job(device_id: str = "", device_type: str = "unknown") -> d
     Holt den aktuellen Mining-Job vom Stratum-Proxy (real mining).
     Aktivierung via ENV: REAL_MINING_ENABLED=1 und XMR_WALLET_ADDRESS gesetzt.
     """
+    _ensure_stratum_started()
     if not REAL_MINING_ENABLED:
         return {"success": False, "error": "Real mining not enabled (set REAL_MINING_ENABLED=1)"}
     job = stratum_get_current_job()
@@ -374,6 +386,7 @@ async def submit_mining_result(task_id: str = "", nonce: str = "", result_hash: 
     Reicht ein Mining-Result beim Stratum-Proxy ein.
     Hinweis: task_id entspricht hier dem job_id vom Pool.
     """
+    _ensure_stratum_started()
     if not REAL_MINING_ENABLED:
         return {"success": False, "error": "Real mining not enabled (set REAL_MINING_ENABLED=1)"}
     if not task_id or not nonce or not result_hash:
@@ -391,6 +404,7 @@ async def get_server_status() -> dict:
     Zeigt Status von Server (MCP), Stratum-Proxy (Pool) und Devices.
     """
     try:
+        _ensure_stratum_started()
         connected = await get_connected_devices()
         inflight = await get_all_inflight()
         pool = stratum_get_pool_stats() if REAL_MINING_ENABLED else {"enabled": False}
@@ -409,6 +423,7 @@ async def get_nanopool_stats(wallet_address: str = "") -> dict:
     """
     Holt Statistiken vom Pool (via Stratum-Proxy/State). Wallet optional, nutzt ENV.
     """
+    _ensure_stratum_started()
     if not REAL_MINING_ENABLED:
         return {"success": False, "error": "Real mining not enabled (set REAL_MINING_ENABLED=1)"}
     stats = stratum_get_pool_stats()
