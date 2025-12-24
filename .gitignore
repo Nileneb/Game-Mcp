@@ -12,3 +12,4 @@ logs/
 *.log
 private.pem
 public.pem
+*.pem

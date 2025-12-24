@@ -27,6 +27,16 @@ echo ""
 echo "${GREEN}🚀 Starting servers...${NC}"
 echo ""
 
+# Lade Umgebungsvariablen aus .env
+if [ -f ".env" ]; then
+    set -a
+    source <(grep -v '^#' .env | grep -v '^$')
+    set +a
+    echo "✅ Environment variables loaded from .env"
+else
+    echo "⚠️  Warning: .env file not found, using defaults"
+fi
+
 # Server 1: Job Server (n8n)
 python3 mcp_job_server.py &
 JOB_PID=$!

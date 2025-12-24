@@ -21,7 +21,7 @@ from typing import Any, Dict, List
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 from pydantic import BaseModel, Field
-import uvicorn
+
 
 # Import shared state
 from shared_state import state, Assignment, Job
@@ -197,25 +197,22 @@ async def list_devices() -> dict:
 # =========================
 
 if __name__ == "__main__":
-    print()
+    print("\n" + "=" * 70)
+    print("📋 MCP JOB SERVER - n8n Integration")
     print("=" * 70)
-    print("📋 MCP JOB SERVER (FastMCP)")
-    print("=" * 70)
-    print()
-    print(f"🔗 n8n MCP Client Tool:")
-    print(f"   Server Transport: HTTP Streamable")
-    print(f"   Endpoint: http://{HOST}:{PORT}/sse")
-    print()
-    print("🔧 Tools:")
-    print("   • create_mining_job")
-    print("   • get_pool_status")
-    print("   • get_leaderboard")
-    print("   • get_job_details")
-    print("   • list_devices")
-    print()
-    print("=" * 70)
-    print()
-    
-    # RICHTIGE LÖSUNG: http_app() + uvicorn!
-    app = mcp.http_app(transport="streamable-http")
-    uvicorn.run(app, host=HOST, port=PORT)
+    print("\n🔗 n8n MCP Client Configuration:")
+    print(f"   URL: http://{HOST}:{PORT}/sse")
+    print(f"   Transport: SSE (Server-Sent Events)")
+    print("\n🔧 Available Tools:")
+    print("   • create_mining_job(num_tasks, chunk_size)")
+    print("   • get_pool_status()")
+    print("   • get_leaderboard()")
+    print("   • get_job_details(job_id)")
+    print("   • list_devices()")
+    print("\n💡 n8n Setup:")
+    print("   1. Add 'MCP Client' tool node")
+    print(f"   2. Set URL: http://{HOST}:{PORT}/sse")
+    print("   3. Transport: SSE")
+    print("   4. Use tools via function calls")
+    print("\n" + "=" * 70 + "\n")
+    mcp.run(transport="sse")
