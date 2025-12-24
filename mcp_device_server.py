@@ -37,12 +37,16 @@ from redis_state import (
 
 # Import shared state
 from shared_state import state
+from stratum_proxy import submit_result as stratum_submit_result
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("mcp-devices")
 
 HOST = os.getenv("DEVICE_SERVER_HOST", "0.0.0.0")
 PORT = int(os.getenv("DEVICE_SERVER_PORT", "8083"))
+XMR_WALLET = os.getenv("XMR_WALLET_ADDRESS", "")
+POOL_HOST = os.getenv("POOL_HOST", "xmr-eu1.nanopool.org")
+POOL_PORT = int(os.getenv("POOL_PORT", "10300"))
 
 # ============================================================================
 # SSE STREAM FÜR UNITY DEVICES
@@ -213,6 +217,93 @@ async def handle_submit_result(request):
         return web.json_response({"ok": False, "error": str(e)}, status=500)
 
 # ============================================================================
+# UNITY COMPAT: DEVICE REGISTRATION & REAL-MINING SUBMIT
+# ============================================================================
+
+async def handle_device_register(request):
+    """POST /device/register — Unity device sends metadata, server returns wallet/pool."""
+    try:
+        body = await request.json()
+        device_id = body.get("device_id") or f"device_{uuid.uuid4().hex[:8]}"
+        device_type = body.get("device_type", "unknown")
+        algorithm = body.get("algorithm", "unknown")
+        platform = body.get("platform", "unknown")
+
+        await register_device(device_id)
+
+        # Basic logging for visibility
+        logger.info(f"📝 Device registered: {device_id} ({device_type}, alg={algorithm}, platform={platform})")
+
+        return web.json_response({
+            "success": True,
+            "wallet_address": XMR_WALLET,
+            "pool_address": f"{POOL_HOST}:{POOL_PORT}",
+            "message": "Device registered"
+        })
+    except Exception as e:
+        logger.error(f"Error in device register: {e}")
+        return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
+async def handle_mining_submit(request):
+    """POST /mining/submit — Unity submits a share for real mining.
+
+    Expected body:
+    {
+      "job_id": "...",
+      "device_id": "Unity_...",
+      "nonce": 12345,
+      "hash": "...",
+      "hashes_computed": 123456,
+      "duration_seconds": 1.23,
+      "algorithm": "randomx|sha256"
+    }
+    """
+    try:
+        body = await request.json()
+        job_id = body.get("job_id", "")
+        device_id = body.get("device_id", "")
+        nonce = str(body.get("nonce", ""))
+        result_hash = body.get("hash", "")
+
+        if not job_id or not nonce or not result_hash:
+            return web.json_response({
+                "share_accepted": False,
+                "reason": "invalid_payload"
+            }, status=400)
+
+        # Submit to Stratum proxy (async)
+        try:
+            submit_resp = await stratum_submit_result(job_id, nonce, result_hash)
+        except Exception as se:
+            logger.error(f"Stratum submit error: {se}")
+            submit_resp = {"submitted": False, "error": str(se)}
+
+        # Update simple stats
+        if device_id:
+            await inc_tasks_completed(device_id)
+
+        # Map response for Unity
+        share_accepted = bool(submit_resp.get("accepted", submit_resp.get("submitted", False)))
+        block_found = bool(submit_resp.get("block_found", False))
+        reward = float(submit_resp.get("reward", 0.0))
+        reason = submit_resp.get("error") or submit_resp.get("reason") or ("ok" if share_accepted else "rejected")
+
+        if reward > 0 and device_id:
+            await add_coins(device_id, reward)
+
+        return web.json_response({
+            "share_accepted": share_accepted,
+            "block_found": block_found,
+            "reward": reward,
+            "reason": reason,
+            "current_balance": 0.0
+        })
+    except Exception as e:
+        logger.error(f"Error in mining submit: {e}")
+        return web.json_response({"share_accepted": False, "reason": str(e)}, status=500)
+
+# ============================================================================
 # DEVICE API
 # ============================================================================
 
@@ -272,9 +363,13 @@ async def main():
     
     # SSE für Devices
     app.router.add_get('/sse', handle_device_sse)
+    # Unity client compatibility path
+    app.router.add_get('/sse/device', handle_device_sse)
     
     # Result Submission
     app.router.add_post('/result', handle_submit_result)
+    # Unity client real-mining submit endpoint
+    app.router.add_post('/mining/submit', handle_mining_submit)
     
     # Device Status
     app.router.add_get('/status', handle_device_status)
@@ -301,9 +396,9 @@ async def main():
     print()
     print("📡 SSE Events:")
     print("   • type: hello        - Device connected")
-    print("   • type: assignment   - New mining task")
+    print("   • type: mining_job   - New real-mining task (Unity)")
     print()
-    print("📤 POST /result Body:")
+    print("📤 POST /result Body (simulation):")
     print("   {")
     print('     "assignment_id": "asg_xxx",')
     print('     "job_id": "job_xxx",')
@@ -312,6 +407,12 @@ async def main():
     print('     "hash": "0000abc...",')
     print('     "conf": 1.0')
     print("   }")
+    print()
+    print("📤 POST /device/register (Unity)")
+    print("   returns wallet + pool config")
+    print()
+    print("📤 POST /mining/submit (Unity)")
+    print("   submits shares to pool via Stratum")
     print()
     print("=" * 70)
     
@@ -323,3 +424,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\n👋 Server stopped")
+
