@@ -20,14 +20,28 @@ from datetime import datetime
 from aiohttp import web
 import aiohttp_cors
 
+# Redis helpers
+from redis_state import (
+    register_device,
+    unregister_device,
+    blpop_task,
+    get_connected_devices,
+    get_inflight,
+    get_device_stats,
+    inc_tasks_completed,
+    add_coins,
+    inc_blocks_found,
+    decr_inflight,
+)
+
 # Import shared state
 from shared_state import state
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("mcp-devices")
 
-HOST = "0.0.0.0"
-PORT = 8083
+HOST = os.getenv("DEVICE_SERVER_HOST", "0.0.0.0")
+PORT = int(os.getenv("DEVICE_SERVER_PORT", "8083"))
 
 # ============================================================================
 # SSE STREAM FÜR UNITY DEVICES
@@ -40,21 +54,11 @@ async def handle_device_sse(request):
     Unity Device verbindet sich hier und bekommt Tasks per SSE gepusht!
     """
     device_id = request.query.get("device_id", f"device_{uuid.uuid4().hex[:8]}")
-    
+
     logger.info(f"🎮 Device connected: {device_id}")
-    
-    # Device Queue erstellen
-    q = asyncio.Queue()
-    state.device_queues[device_id] = q
-    state.device_inflight.setdefault(device_id, 0)
-    
-    # Leaderboard initialisieren
-    if device_id not in state.leaderboard:
-        state.leaderboard[device_id] = {
-            "coins": 0.0,
-            "blocks_found": 0,
-            "tasks_completed": 0
-        }
+
+    # Register device in Redis (presence + idx + init stats)
+    await register_device(device_id)
     
     response = web.StreamResponse(
         status=200,
@@ -72,14 +76,20 @@ async def handle_device_sse(request):
         f"data: {json.dumps({'type': 'hello', 'device_id': device_id})}\n\n".encode()
     )
     
-    # Pending Tasks verteilen
-    await state.drain_pending()
+    # Attempt to drain pending assignments via Redis (safe across processes)
+    try:
+        await state.drain_pending()
+    except Exception:
+        pass
     
     try:
         while True:
             # Warte auf Assignment oder Timeout
             try:
-                msg = await asyncio.wait_for(q.get(), timeout=30)
+                msg = await blpop_task(device_id, timeout=30)
+                if not msg:
+                    # Timeout → send ping below
+                    raise asyncio.TimeoutError()
                 data = json.dumps(msg)
                 await response.write(f"data: {data}\n\n".encode())
                 logger.info(f"📤 {device_id}: Assignment sent")
@@ -93,8 +103,7 @@ async def handle_device_sse(request):
         logger.error(f"Error in SSE stream: {e}")
     finally:
         # Cleanup
-        state.device_queues.pop(device_id, None)
-        state.device_inflight.pop(device_id, None)
+        await unregister_device(device_id)
         logger.info(f"🎮 Device disconnected: {device_id}")
     
     return response
@@ -129,55 +138,50 @@ async def handle_submit_result(request):
         hash_result = body.get("hash")
         conf = body.get("conf", 1.0)
         
-        if not assignment_id or assignment_id not in state.assignments:
+        if not assignment_id:
             return web.json_response({"ok": False, "error": "Invalid assignment"}, status=400)
-        
-        asg = state.assignments[assignment_id]
+
+        asg = state.assignments.get(assignment_id)
         job = state.jobs.get(job_id)
         
-        if not job:
-            return web.json_response({"ok": False, "error": "Job not found"}, status=400)
-        
-        # Assignment als done markieren
-        asg.status = "done"
-        asg.updated_at = time.time()
+        # Assignment als done markieren (best-effort)
+        if asg:
+            asg.status = "done"
+            asg.updated_at = time.time()
         
         # Inflight counter reduzieren
-        if asg.client_id:
-            state.device_inflight[asg.client_id] = max(0, state.device_inflight.get(asg.client_id, 1) - 1)
+        if device_id:
+            await decr_inflight(device_id)
         
-        # Job stats
-        job.tasks_completed += 1
+        # Job stats (best-effort if present in this process)
+        if job:
+            job.tasks_completed += 1
         
         # Leaderboard stats
-        if device_id in state.leaderboard:
-            state.leaderboard[device_id]["tasks_completed"] += 1
+        await inc_tasks_completed(device_id)
         
-        # Prüfe ob gültiger Hash gefunden
-        required_zeros = "0" * asg.task_data["difficulty"]
-        
-        if hash_result and hash_result.startswith(required_zeros):
-            # WINNER!
-            logger.info(f"🎉 POTENTIAL WINNER: {device_id} found hash!")
-            
+        # Prüfe ob gültiger Hash gefunden (via Blockchain validator)
+        if hash_result:
+            logger.info(f"🎉 POTENTIAL WINNER: {device_id} submitted hash!")
+
             result = state.blockchain.submit_solution(nonce, hash_result, device_id)
             
             if result["success"]:
                 # Reward vergeben
-                if device_id in state.leaderboard:
-                    state.leaderboard[device_id]["coins"] += result["reward"]
-                    state.leaderboard[device_id]["blocks_found"] += 1
+                await add_coins(device_id, float(result["reward"]))
+                await inc_blocks_found(device_id)
                 
-                # Job als completed markieren
-                job.status = "completed"
-                job.winner = device_id
-                job.winning_hash = hash_result
-                job.winning_nonce = nonce
+                # Job als completed markieren (best-effort)
+                if job:
+                    job.status = "completed"
+                    job.winner = device_id
+                    job.winning_hash = hash_result
+                    job.winning_nonce = nonce
                 
                 # Alle pending tasks dieses Jobs canceln
-                for asg_id, a in state.assignments.items():
-                    if a.job_id == job_id and a.status in ("queued", "assigned"):
-                        a.status = "cancelled"
+                for asg_id2, a2 in list(state.assignments.items()):
+                    if a2.job_id == job_id and a2.status in ("queued", "assigned"):
+                        a2.status = "cancelled"
                 
                 logger.info(f"🏆 WINNER CONFIRMED: {device_id} - Block #{result['block_index']} - Reward: {result['reward']:.4f} coins")
                 
@@ -214,31 +218,40 @@ async def handle_submit_result(request):
 async def handle_device_status(request):
     """GET /status?device_id=xxx"""
     device_id = request.query.get("device_id", "unknown")
-    
-    stats = state.leaderboard.get(device_id, {
-        "coins": 0,
-        "blocks_found": 0,
-        "tasks_completed": 0
-    })
-    
-    inflight = state.device_inflight.get(device_id, 0)
-    connected = device_id in state.device_queues
-    
+
+    connected_list = await get_connected_devices()
+    connected = device_id in connected_list
+    inflight = await get_inflight(device_id)
+    stats = await get_device_stats(device_id)
+
     return web.json_response({
         "device_id": device_id,
         "connected": connected,
         "inflight_tasks": inflight,
-        "stats": stats
+        "stats": stats,
     })
 
 async def handle_health(request):
     """GET /health"""
-    return web.json_response({
-        "status": "healthy",
-        "server": "MCP Device Server",
-        "connected_devices": len(state.device_queues),
-        "pending_tasks": len(state.pending_queue)
-    })
+    try:
+        from redis_state import get_redis, get_connected_devices
+        r = get_redis()
+        connected = await get_connected_devices()
+        pending = int(await r.llen("assignments:pending"))
+        return web.json_response({
+            "status": "healthy",
+            "server": "MCP Device Server",
+            "connected_devices": len(connected),
+            "pending_tasks": pending,
+        })
+    except Exception:
+        # Fallback to legacy in-memory counts
+        return web.json_response({
+            "status": "healthy",
+            "server": "MCP Device Server",
+            "connected_devices": len(getattr(state, 'device_queues', {})),
+            "pending_tasks": len(getattr(state, 'pending_queue', [])),
+        })
 
 # ============================================================================
 # MAIN

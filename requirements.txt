@@ -4,3 +4,4 @@ aiohttp-cors==0.7.0
 python-dotenv==1.0.0
 fastmcp
 uvicorn
+redis>=5.0.0

@@ -13,3 +13,4 @@ logs/
 private.pem
 public.pem
 *.pem
+/realmining

@@ -11,6 +11,17 @@ import uuid
 from datetime import datetime
 from typing import Dict, List, Optional
 from collections import deque
+import json
+
+# Redis-backed helpers
+from redis_state import (
+    get_redis,
+    get_connected_devices,
+    get_all_inflight,
+    incr_inflight,
+    decr_inflight,
+    push_task,
+)
 
 # ============================================================================
 # BLOCKCHAIN
@@ -157,71 +168,87 @@ class SharedState:
         self.blockchain = Blockchain()
         self.jobs: Dict[str, Job] = {}
         self.assignments: Dict[str, Assignment] = {}
-        self.pending_queue: deque = deque()  # Assignment IDs
-        self.device_queues: Dict[str, asyncio.Queue] = {}  # device_id -> Queue
-        self.device_inflight: Dict[str, int] = {}  # device_id -> count
-        self.leaderboard: Dict[str, dict] = {}  # device_id -> stats
+        # Pending assignments will be persisted in Redis to share across processes
+        # Keys used (via get_redis() client):
+        # - list:  assignments:pending (values: assignment_id)
+        # - hash:  assignment:payload:{assignment_id} (fields of task payload)
+        # Inflight/device presence/leaderboard handled via redis_state helpers
+        self.leaderboard: Dict[str, dict] = {}  # kept for backward-compat, no longer source of truth
         
         # Config
         self.assign_ttl = 120  # Sekunden
         self.max_inflight_per_device = 2
     
     def best_device_id(self) -> Optional[str]:
-        """Findet Device mit wenigsten Tasks"""
-        if not self.device_queues:
+        """Findet Device mit wenigsten Inflight-Tasks (via Redis)"""
+        return asyncio.get_event_loop().run_until_complete(self._best_device_id_async())
+
+    async def _best_device_id_async(self) -> Optional[str]:
+        devices = await get_connected_devices()
+        if not devices:
             return None
-        return min(
-            self.device_queues.keys(),
-            key=lambda d: self.device_inflight.get(d, 0)
-        )
+        inflight = await get_all_inflight()
+        return min(devices, key=lambda d: inflight.get(d, 0))
     
     async def assign_to_device_or_pending(self, asg: Assignment):
-        """Assignment an Device oder in Pending Queue"""
-        device_id = self.best_device_id()
-        
-        if device_id is None or self.device_inflight.get(device_id, 0) >= self.max_inflight_per_device:
-            self.pending_queue.append(asg.assignment_id)
+        """Assignment an Device (via Redis Queue) oder in Redis-Pending-Liste"""
+        device_id = await self._best_device_id_async()
+        if device_id is None:
+            await self._store_pending(asg)
             return
-        
+        inflight_counts = await get_all_inflight()
+        if inflight_counts.get(device_id, 0) >= self.max_inflight_per_device:
+            await self._store_pending(asg)
+            return
         await self.deliver(device_id, asg)
     
     async def deliver(self, device_id: str, asg: Assignment):
-        """Assignment an Device pushen"""
-        self.device_inflight[device_id] = self.device_inflight.get(device_id, 0) + 1
+        """Assignment an Device pushen (via Redis Queue)"""
+        await incr_inflight(device_id)
         asg.client_id = device_id
         asg.status = "assigned"
         asg.updated_at = time.time()
         asg.deadline = time.time() + self.assign_ttl
-        
-        await self.device_queues[device_id].put({
+
+        payload = {
             "type": "assignment",
             "job_id": asg.job_id,
             "assignment_id": asg.assignment_id,
-            **asg.task_data
-        })
-        
+            **asg.task_data,
+        }
+        await push_task(device_id, payload)
+
         # Watch für Expiry
         asyncio.create_task(self._watch_expiry(asg))
     
     async def drain_pending(self):
-        """Pending Queue an freie Devices verteilen"""
-        if not self.pending_queue:
-            return
-        
-        remaining = deque()
-        while self.pending_queue:
-            asg_id = self.pending_queue.popleft()
+        """Pending Queue (Redis) an freie Devices verteilen"""
+        r = get_redis()
+        # Limit the number of items processed per call to avoid long locks
+        max_items = 100
+        for _ in range(max_items):
+            asg_id = await r.lpop("assignments:pending")
+            if not asg_id:
+                break
             asg = self.assignments.get(asg_id)
-            if not asg or asg.status != "queued":
-                continue
-            
-            device_id = self.best_device_id()
-            if device_id is None or self.device_inflight.get(device_id, 0) >= self.max_inflight_per_device:
-                remaining.append(asg_id)
-            else:
-                await self.deliver(device_id, asg)
-        
-        self.pending_queue = remaining
+            # If assignment not in local memory, try to load payload from Redis and rebuild minimal asg
+            if not asg:
+                payload = await r.hgetall(f"assignment:payload:{asg_id}")
+                if not payload:
+                    continue
+                # Minimal reconstruction for delivery
+                job_id = payload.get("job_id", "")
+                task_data = {k: v for k, v in payload.items() if k not in ("job_id", "assignment_id", "type")}
+                asg = Assignment(job_id, asg_id, task_data)
+                self.assignments[asg_id] = asg
+
+            device_id = await self._best_device_id_async()
+            inflight_counts = await get_all_inflight()
+            if device_id is None or inflight_counts.get(device_id, 0) >= self.max_inflight_per_device:
+                # Requeue at tail if cannot deliver now
+                await r.rpush("assignments:pending", asg_id)
+                break
+            await self.deliver(device_id, asg)
     
     async def _watch_expiry(self, asg: Assignment):
         """Überwacht Assignment Timeout"""
@@ -232,7 +259,7 @@ class SharedState:
         
         asg.status = "expired"
         if asg.client_id:
-            self.device_inflight[asg.client_id] = max(0, self.device_inflight.get(asg.client_id, 1) - 1)
+            await decr_inflight(asg.client_id)
         
         # Re-queue
         job = self.jobs.get(asg.job_id)
@@ -240,10 +267,23 @@ class SharedState:
             new_asg = Assignment(
                 job_id=asg.job_id,
                 assignment_id=f"asg_{uuid.uuid4().hex[:8]}",
-                task_data=asg.task_data
+                task_data=asg.task_data,
             )
             self.assignments[new_asg.assignment_id] = new_asg
             await self.assign_to_device_or_pending(new_asg)
+
+    async def _store_pending(self, asg: Assignment) -> None:
+        r = get_redis()
+        await r.hset(
+            f"assignment:payload:{asg.assignment_id}",
+            mapping={
+                "type": "assignment",
+                "job_id": asg.job_id,
+                "assignment_id": asg.assignment_id,
+                **{k: str(v) for k, v in asg.task_data.items()},
+            },
+        )
+        await r.rpush("assignments:pending", asg.assignment_id)
 
 # Singleton Instance
 state = SharedState()

@@ -37,6 +37,22 @@ else
     echo "⚠️  Warning: .env file not found, using defaults"
 fi
 
+# Basic validation
+if [ -z "$FASTMCP_HOST" ] || [ -z "$FASTMCP_PORT" ]; then
+    echo "ℹ️ FASTMCP_HOST/FASTMCP_PORT not set, using defaults (0.0.0.0:8082)"
+    export FASTMCP_HOST="${FASTMCP_HOST:-0.0.0.0}"
+    export FASTMCP_PORT="${FASTMCP_PORT:-8082}"
+fi
+
+if [ "${REAL_MINING_ENABLED}" = "1" ]; then
+    if [ -z "${XMR_WALLET_ADDRESS}" ]; then
+        echo "❌ REAL_MINING_ENABLED=1 but XMR_WALLET_ADDRESS not set. Disable or set wallet in .env."
+        exit 1
+    fi
+    echo "💰 Real mining enabled. Wallet: ${XMR_WALLET_ADDRESS:0:30}..."
+    echo "🏊 Pool: ${POOL_HOST:-xmr-eu1.nanopool.org}:${POOL_PORT:-10300} as ${WORKER_NAME:-game-mcp}"
+fi
+
 # Server 1: Job Server (n8n)
 python3 mcp_job_server.py &
 JOB_PID=$!
@@ -50,8 +66,8 @@ DEVICE_PID=$!
 echo ""
 echo "${GREEN}✅ Both servers running!${NC}"
 echo ""
-echo "📋 Job Server (n8n):      PID $JOB_PID  → http://192.168.178.12:8082"
-echo "🎮 Device Server (Unity): PID $DEVICE_PID → http://192.168.178.12:8083"
+echo "📋 Job Server (n8n):      PID $JOB_PID  → http://${FASTMCP_HOST}:${FASTMCP_PORT}"
+echo "🎮 Device Server (Unity): PID $DEVICE_PID → http://${DEVICE_SERVER_HOST:-0.0.0.0}:${DEVICE_SERVER_PORT:-8083}"
 echo ""
 echo "Press Ctrl+C to stop all servers..."
 echo ""
